@@ -311,6 +311,83 @@ impl App {
             format!("loaded {loaded_now} new · {n} total · {referenced_dlqs} queues are DLQs");
     }
 
+    /// `L` — jump the cursor to the focused queue's DLQ relationship.
+    /// Two directions:
+    ///   * Focused queue has a `RedrivePolicy` → jump to the queue it
+    ///     names as its DLQ.
+    ///   * Focused queue has `redrive_sources` (other queues point at
+    ///     THIS one as their DLQ) → jump to the first source.
+    ///
+    /// Both target queues must be loaded in the current tab; otherwise
+    /// the status line explains and selection stays put. Prereq: `A`
+    /// (load all attributes) has run at least once so ARNs +
+    /// `redrive_sources` are populated.
+    pub fn jump_to_dlq(&mut self) {
+        let idx = self.active_tab;
+        let sel = self.tabs[idx].data.selected;
+        let Some(q) = self.tabs[idx].data.queues.get(sel) else {
+            self.status = "no queue under cursor".into();
+            return;
+        };
+        // Direction 1: focused queue → its DLQ via RedrivePolicy.
+        let dlq_target: Option<String> = q
+            .attributes
+            .as_ref()
+            .and_then(|a| a.redrive_policy())
+            .and_then(sqs::dlq_target_arn);
+        if let Some(target_arn) = dlq_target {
+            // Find the queue with this ARN in the current tab's list.
+            let found = self.tabs[idx].data.queues.iter().position(|cand| {
+                cand.attributes
+                    .as_ref()
+                    .and_then(|a| a.arn())
+                    .map(|arn| arn == target_arn)
+                    .unwrap_or(false)
+            });
+            match found {
+                Some(target_idx) => {
+                    self.tabs[idx].data.selected = target_idx;
+                    let target_name = self.tabs[idx].data.queues[target_idx].name().to_string();
+                    self.status = format!("jumped to DLQ: {target_name}");
+                }
+                None => {
+                    // ARN known but the target queue isn't in this tab.
+                    // Could be a DLQ in a different region / account, or
+                    // simply not loaded yet (no `A`).
+                    self.status = format!(
+                        "DLQ {target_arn} not loaded in this tab — switch to All Queues + press A"
+                    );
+                }
+            }
+            return;
+        }
+        // Direction 2: focused queue IS a DLQ → jump to first source.
+        if let Some(source_name) = q.redrive_sources.first() {
+            let source_name = source_name.clone();
+            let found = self.tabs[idx]
+                .data
+                .queues
+                .iter()
+                .position(|cand| cand.name() == source_name);
+            match found {
+                Some(source_idx) => {
+                    self.tabs[idx].data.selected = source_idx;
+                    self.status = format!("jumped to DLQ source: {source_name}");
+                }
+                None => {
+                    self.status = format!("source {source_name} not in tab — press A first");
+                }
+            }
+            return;
+        }
+        // No RedrivePolicy and no recorded sources.
+        self.status = if q.attributes.is_some() {
+            "no DLQ relationship — queue has no RedrivePolicy and isn't referenced as one".into()
+        } else {
+            "attributes not loaded — press A first".into()
+        };
+    }
+
     /// Walk all loaded queues' RedrivePolicy fields and populate each
     /// queue's `redrive_sources` with the names of queues that point
     /// AT it as their DLQ. Idempotent — clears and rebuilds.
