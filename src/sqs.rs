@@ -98,6 +98,11 @@ pub fn queue_name_from_url(url: &str) -> &str {
 pub struct Queue {
     pub url: String,
     pub attributes: Option<QueueAttributes>,
+    /// Names of queues that have this queue *as their DLQ target*.
+    /// Populated by `App::recompute_redrive_sources()` after the user
+    /// has loaded all queues' attributes (the `A` action). Empty when
+    /// not yet computed or when no queue references this one as a DLQ.
+    pub redrive_sources: Vec<String>,
 }
 
 impl Queue {
@@ -116,20 +121,45 @@ impl Queue {
         let visible = attrs.approximate_messages().unwrap_or(0);
         let in_flight = attrs.approximate_messages_not_visible().unwrap_or(0);
         let delayed = attrs.approximate_messages_delayed().unwrap_or(0);
-        let dlq_chip = if attrs.has_dlq() { " · DLQ" } else { "" };
+        // Two distinct DLQ chips:
+        //   ↓ DLQ — this queue *has* a DLQ configured for itself
+        //   ↑ DLQ — this queue *is* a DLQ for N other queues
+        // Both can apply simultaneously (rare but valid: a queue with
+        // its own DLQ, which is itself a DLQ target — like a chain).
+        let down_chip = if attrs.has_dlq() { " · ↓ DLQ" } else { "" };
+        let up_chip = if !self.redrive_sources.is_empty() {
+            if self.redrive_sources.len() == 1 {
+                " · ↑ DLQ".to_string()
+            } else {
+                format!(" · ↑ DLQ x{}", self.redrive_sources.len())
+            }
+        } else {
+            String::new()
+        };
         let fifo_chip = if self.is_fifo() { " · FIFO" } else { "" };
         if delayed > 0 {
             format!(
-                "{visible} msg · {in_flight} in-flight · {delayed} delayed{fifo_chip}{dlq_chip}"
+                "{visible} msg · {in_flight} in-flight · {delayed} delayed{fifo_chip}{down_chip}{up_chip}"
             )
         } else {
-            format!("{visible} msg · {in_flight} in-flight{fifo_chip}{dlq_chip}")
+            format!("{visible} msg · {in_flight} in-flight{fifo_chip}{down_chip}{up_chip}")
         }
     }
 
     pub fn is_fifo(&self) -> bool {
         self.url.ends_with(".fifo")
     }
+}
+
+/// Extract `deadLetterTargetArn` from a RedrivePolicy JSON blob (the
+/// raw string SQS returns). Returns the ARN, or None if the policy is
+/// malformed / missing the field. Independent of the rest of the policy
+/// (we don't care about maxReceiveCount for correlation).
+pub fn dlq_target_arn(redrive_policy: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(redrive_policy).ok()?;
+    v.get("deadLetterTargetArn")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 /// List every queue in the region. Pass `prefix=Some(...)` to scope to
@@ -298,13 +328,43 @@ mod tests {
         let q = Queue {
             url: "https://sqs.us-east-1.amazonaws.com/1/x.fifo".to_string(),
             attributes: None,
+            redrive_sources: vec![],
         };
         assert!(q.is_fifo());
         let non = Queue {
             url: "https://sqs.us-east-1.amazonaws.com/1/x".to_string(),
             attributes: None,
+            redrive_sources: vec![],
         };
         assert!(!non.is_fifo());
+    }
+
+    #[test]
+    fn dlq_target_arn_extracted_from_redrive_policy() {
+        let policy = r#"{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:1:dlq","maxReceiveCount":3}"#;
+        assert_eq!(
+            dlq_target_arn(policy),
+            Some("arn:aws:sqs:us-east-1:1:dlq".to_string())
+        );
+        assert!(dlq_target_arn("not json").is_none());
+        assert!(dlq_target_arn(r#"{"maxReceiveCount":3}"#).is_none());
+    }
+
+    #[test]
+    fn redrive_sources_chip_singular_vs_plural() {
+        let attrs = QueueAttributes::from_map(HashMap::from([(
+            "ApproximateNumberOfMessages".to_string(),
+            "0".to_string(),
+        )]));
+        let mut q = Queue {
+            url: "https://sqs.us-east-1.amazonaws.com/1/dlq".to_string(),
+            attributes: Some(attrs.clone()),
+            redrive_sources: vec!["source-a".to_string()],
+        };
+        assert!(q.secondary_label().contains("↑ DLQ"));
+        assert!(!q.secondary_label().contains("x"));
+        q.redrive_sources = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert!(q.secondary_label().contains("↑ DLQ x3"));
     }
 
     #[test]
@@ -324,6 +384,7 @@ mod tests {
         let q = Queue {
             url: "https://sqs.us-east-1.amazonaws.com/1/x".to_string(),
             attributes: None,
+            redrive_sources: vec![],
         };
         assert!(q.secondary_label().contains("attrs not loaded"));
     }

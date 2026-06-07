@@ -14,6 +14,7 @@ pub enum Action {
     OpenConsole,
     YankUrl,
     YankArn,
+    LoadAllAttributes,
     Refresh,
     SwitchTab(usize),
     NextTab,
@@ -34,6 +35,7 @@ pub fn handle(key: KeyEvent, _app: &App) -> Option<Action> {
         KeyCode::Char('o') | KeyCode::Enter => Some(Action::OpenConsole),
         KeyCode::Char('y') => Some(Action::YankUrl),
         KeyCode::Char('Y') => Some(Action::YankArn),
+        KeyCode::Char('A') => Some(Action::LoadAllAttributes),
         KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Tab => Some(Action::NextTab),
         KeyCode::BackTab => Some(Action::PrevTab),
@@ -54,6 +56,7 @@ pub async fn apply(action: Action, app: &mut App) -> bool {
         Action::OpenConsole => app.open_console(),
         Action::YankUrl => app.yank_url(),
         Action::YankArn => app.yank_arn(),
+        Action::LoadAllAttributes => app.load_all_attributes(),
         Action::Refresh => app.refresh_active(),
         Action::NextTab => {
             let next = (app.active_tab + 1) % app.tabs.len();

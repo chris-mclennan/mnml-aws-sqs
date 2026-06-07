@@ -152,6 +152,7 @@ impl App {
                     .map(|url| Queue {
                         url,
                         attributes: None,
+                        redrive_sources: vec![],
                     })
                     .collect();
                 t.data.selected = t.data.selected.min(count.saturating_sub(1));
@@ -265,6 +266,87 @@ impl App {
         match crate::clipboard::copy(&arn) {
             Ok(()) => self.status = format!("copied ARN: {arn}"),
             Err(e) => self.status = format!("copy failed: {e}"),
+        }
+    }
+
+    /// `A` — fetch attributes for every queue in the current tab, then
+    /// run the redrive-source correlation pass. Expensive (N
+    /// `get-queue-attributes` calls) — so it's an explicit action,
+    /// not part of normal navigation. Reports progress via the status
+    /// line.
+    pub fn load_all_attributes(&mut self) {
+        let idx = self.active_tab;
+        let n = self.tabs[idx].data.queues.len();
+        if n == 0 {
+            self.status = "no queues to load".into();
+            return;
+        }
+        let region = self.tabs[idx].spec.region.clone();
+        let mut loaded_now = 0usize;
+        for q_idx in 0..n {
+            if self.tabs[idx].data.queues[q_idx].attributes.is_some() {
+                continue;
+            }
+            let url = self.tabs[idx].data.queues[q_idx].url.clone();
+            match sqs::get_attributes(&url, region.as_deref()) {
+                Ok(attrs) => {
+                    self.tabs[idx].data.queues[q_idx].attributes = Some(attrs);
+                    loaded_now += 1;
+                }
+                Err(e) => {
+                    // Surface the error but keep going — partial knowledge
+                    // is better than nothing for the correlation pass.
+                    self.status = format!("attrs error on {url}: {e}");
+                }
+            }
+        }
+        self.recompute_redrive_sources();
+        let referenced_dlqs = self.tabs[idx]
+            .data
+            .queues
+            .iter()
+            .filter(|q| !q.redrive_sources.is_empty())
+            .count();
+        self.status =
+            format!("loaded {loaded_now} new · {n} total · {referenced_dlqs} queues are DLQs");
+    }
+
+    /// Walk all loaded queues' RedrivePolicy fields and populate each
+    /// queue's `redrive_sources` with the names of queues that point
+    /// AT it as their DLQ. Idempotent — clears and rebuilds.
+    pub fn recompute_redrive_sources(&mut self) {
+        let idx = self.active_tab;
+        // First pass: build target_arn → [source_name] map.
+        let mut by_target: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for q in &self.tabs[idx].data.queues {
+            let Some(attrs) = &q.attributes else {
+                continue;
+            };
+            let Some(policy) = attrs.redrive_policy() else {
+                continue;
+            };
+            let Some(target_arn) = sqs::dlq_target_arn(policy) else {
+                continue;
+            };
+            by_target
+                .entry(target_arn)
+                .or_default()
+                .push(q.name().to_string());
+        }
+        // Second pass: for each queue, look up its OWN ARN in the map
+        // and copy in the source names.
+        for q in &mut self.tabs[idx].data.queues {
+            let Some(attrs) = &q.attributes else {
+                q.redrive_sources.clear();
+                continue;
+            };
+            let Some(arn) = attrs.arn() else {
+                q.redrive_sources.clear();
+                continue;
+            };
+            q.redrive_sources = by_target.get(arn).cloned().unwrap_or_default();
+            q.redrive_sources.sort();
         }
     }
 }

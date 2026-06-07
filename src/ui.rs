@@ -268,17 +268,33 @@ fn draw_detail(f: &mut Frame, area: Rect, queue: Option<&Queue>) {
         lines.push(kv("LastModified", modified));
     }
 
-    // Redrive policy (DLQ)
+    // Redrive policy (DLQ) — this queue *has* a DLQ.
     if let Some(rp) = attrs.redrive_policy() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            " Redrive policy (DLQ) ",
+            " ↓ Redrive policy (this queue's DLQ) ",
             Style::default().fg(Color::DarkGray),
         )]));
         for ln in rp.lines().take(6) {
             lines.push(Line::from(Span::styled(
                 format!(" {ln}"),
                 Style::default().fg(Color::Gray),
+            )));
+        }
+    }
+
+    // Redrive sources — this queue *is* a DLQ for N others. Empty
+    // until the user runs `A` (load all + correlate).
+    if !q.redrive_sources.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            format!(" ↑ DLQ for ({}) ", q.redrive_sources.len()),
+            Style::default().fg(Color::DarkGray),
+        )]));
+        for src in &q.redrive_sources {
+            lines.push(Line::from(Span::styled(
+                format!(" {src}"),
+                Style::default().fg(Color::Cyan),
             )));
         }
     }
@@ -301,7 +317,7 @@ fn draw_detail(f: &mut Frame, area: Rect, queue: Option<&Queue>) {
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
-    let hint = " 1-9 tab · ↑↓/jk move · o console · y yank URL · Y yank ARN · r refresh · q quit ";
+    let hint = " 1-9 tab · ↑↓/jk move · o console · y URL · Y ARN · A all+DLQ-correlate · r refresh · q quit ";
     let line = Line::from(vec![
         Span::styled(
             format!(" {} ", app.status),
