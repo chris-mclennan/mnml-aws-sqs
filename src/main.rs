@@ -4,6 +4,7 @@ mod clipboard;
 mod config;
 mod keys;
 mod sqs;
+mod theme;
 mod ui;
 
 use anyhow::Result;
